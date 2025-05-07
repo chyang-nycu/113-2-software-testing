@@ -1,5 +1,5 @@
-#include "llvm/Passes/PassPlugin.h"
-#include "llvm/Passes/PassBuilder.h"
+#include "llvm/Pass.h"
+#include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Constants.h"
@@ -7,10 +7,12 @@
 
 using namespace llvm;
 
-// 定義 LLVMPass
-struct LLVMPass : public PassInfoMixin<LLVMPass> {
-  // run() 方法會在優化管線的最後階段被調用
-  PreservedAnalyses run(Module &M, ModuleAnalysisManager &MAM) {
+namespace {
+struct LLVMPass : public ModulePass {
+  static char ID;
+  LLVMPass() : ModulePass(ID) {}
+
+  bool runOnModule(Module &M) override {
     LLVMContext &Ctx = M.getContext();
     // i32 類型
     IntegerType *Int32Ty = IntegerType::getInt32Ty(Ctx);
@@ -39,35 +41,24 @@ struct LLVMPass : public PassInfoMixin<LLVMPass> {
         // 3) 覆蓋 argv[1] 為 "hayaku... motohayaku!"
         Argument *argvArg = F.getArg(1);
         // 在全局段中創建字符串常量，並返回 i8* 指針
-        Constant *newStr =
-            Builder.CreateGlobalStringPtr("hayaku... motohayaku!", "instr_str");
+        Value *newStr = Builder.CreateGlobalStringPtr("hayaku... motohayaku!");
         // 構造索引常量 1
-        ConstantInt *idxOne = ConstantInt::get(Int32Ty, 1);
+        Value *idxs[] = {ConstantInt::get(Int32Ty, 1)};
         // 生成 getelementptr 指令，計算 argv + 1 的地址，類型為 i8**
-        Value *gep = Builder.CreateInBoundsGEP(
+        Value *argv1Ptr = Builder.CreateInBoundsGEP(
             argvArg->getType()->getPointerElementType(), // 指針所指元素類型 i8*
             argvArg,
-            idxOne,
+            idxs,
             "argv1ptr");
         // 將 newStr 存入 argv[1]
-        Builder.CreateStore(newStr, gep);
+        Builder.CreateStore(newStr, argv1Ptr);
       }
     }
 
-    // 因為我們改動了函數內部的 IR，標記所有分析均不再保留
-    return PreservedAnalyses::none();
+    return true;
   }
 };
-
-// 註冊 Pass 插件
-extern "C" ::llvm::PassPluginLibraryInfo LLVM_ATTRIBUTE_WEAK
-llvmGetPassPluginInfo() {
-  return {LLVM_PLUGIN_API_VERSION, "LLVMPass", "1.0",
-          [](PassBuilder &PB) {
-            // 在優化管線最後階段插入我們的 LLVMPass
-            PB.registerOptimizerLastEPCallback(
-                [](ModulePassManager &MPM, OptimizationLevel) {
-                  MPM.addPass(LLVMPass());
-                });
-          }};
 }
+
+char LLVMPass::ID = 0;
+static RegisterPass<LLVMPass> X("LLVMPass", "LLVM Pass for Lab6");
