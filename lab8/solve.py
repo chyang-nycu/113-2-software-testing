@@ -18,44 +18,39 @@ def main():
         sys.exit(1)
     gate_addr = gate_sym.rebased_addr
 
-    # 3) blank_state：直接在 gate() 入口開始執行
-    state = proj.factory.blank_state(addr=gate_addr)
+    # 3) 準備一個 8 字元的符號向量
+    sym_in = claripy.BVS('in', KEY_LEN * 8)
 
-    # 4) 在 heap 申請 KEY_LEN bytes，並逐字塞入符號變數
-    # 從 heap 配置一塊記憶體空間
-    buf = state.heap.allocate(KEY_LEN)
+    # 4) 取一塊 .bss 作為輸入緩衝區，並把符號寫進去
+    bss_addr = proj.loader.main_object.sections_map['.bss'].min_addr
+    # blank_state 只用來寫記憶體
+    tmp_state = proj.factory.blank_state()
+    tmp_state.memory.store(bss_addr, sym_in)
 
-    key_vars = []
-    # 用符號變數填充 buf
+    # 5) 用 call_state 直接呼 gate(bss_addr)
+    #    注意這裡的 API：call_state(addr, *args)
+    state = proj.factory.call_state(gate_addr, bss_addr, base_state=tmp_state)
+
+    # 6) 加入避免 strlen/fgets 斷掉的約束
     for i in range(KEY_LEN):
-        b = claripy.BVS(f'k{i}', 8)            # 建立 8-bit 的符號變數，代表第 i 個字元
-        key_vars.append(b)
-        state.memory.store(buf + i, b)        # 依序寫入 buf 指向的記憶體中的第 i 個位置
+        byte = claripy.Extract(i * 8 + 7, i * 8, sym_in)
+        state.solver.add(byte != 0)     # 不允許 0x00
+        state.solver.add(byte != 0x0a)  # 不允許 '\n'
 
-    # 5) 按照 SystemV x86_64 呼叫慣例，第一個參數放在 rdi
-    state.regs.rdi = buf
-
-    # 避免符號 byte 為 0 / '\n' 造成奇怪結果
-    for b in key_vars:
-        state.solver.add(b != 0)       # 不允許是 NULL（0x00），否則 strlen(input) 會提早結束
-        state.solver.add(b != 0x0a)    # 不允許是換行（0x0a），否則 fgets() 會提早結束
-
-    # 6) 探索：找到 stdout 含「Correct!」的狀態；避開任何印出「Wrong key!」的分支
-    # 建立一個模擬器（Simulation Manager），開始從 state 模擬執行。
+    # 7) 探索：stdout 含 "Correct!" 停止；含 "Wrong key!" 的路徑避開
     simgr = proj.factory.simgr(state)
-    # explore() 會自動走過所有可能的分支、跳轉與條件，尋找滿足目標條件的執行路徑。
     simgr.explore(
-        find=lambda s: b"Correct!" in s.posix.dumps(1),
-        avoid=lambda s: b"Wrong key!" in s.posix.dumps(1),
+        find = lambda s: b"Correct!" in s.posix.dumps(1),
+        avoid= lambda s: b"Wrong key!" in s.posix.dumps(1),
     )
 
-    # 7) 取出解並輸出
     if not simgr.found:
-        print("[-] 沒有找到符合條件的輸入！", file=sys.stderr)
+        print("[-] 沒找到符合條件的輸入！", file=sys.stderr)
         sys.exit(1)
-    found = simgr.found[0]
-    solution = found.solver.eval(claripy.Concat(*key_vars), cast_to=bytes)
-    sys.stdout.buffer.write(solution + b'\n')
+
+    # 8) 取出解並輸出
+    sol = simgr.found[0].solver.eval(sym_in, cast_to=bytes)
+    sys.stdout.buffer.write(sol + b'\n')
 
 if __name__ == '__main__':
     main()
